@@ -95,18 +95,17 @@ def patch(code: types.CodeType) -> types.CodeType:
             arg = _get_offset(target_idx) - 2 - _get_offset(i)
 
         if arg >= 256:
-            _, first, second, last = _split_arg(arg)
-            if last:
-                instructions.insert(i, _Instruction(dis.opmap["EXTENDED_ARG"], last))
+            for _, extended_argv in _split_arg(arg):
+                instructions.insert(i, _Instruction(dis.opmap["EXTENDED_ARG"], extended_argv))
                 next(it)
-            if second:
-                instructions.insert(i, _Instruction(dis.opmap["EXTENDED_ARG"], second))
-                next(it)
-            instructions.insert(i, _Instruction(dis.opmap["EXTENDED_ARG"], first))
-            next(it)
+            last_extended_arg = instructions[i]  # most top EXTENDED_ARG
+
+            jump_referrer = filter(lambda x: x.jump_target == ins.id, instructions)
+            for referrer_ins in jump_referrer:
+                referrer_ins.jump_target = last_extended_arg.id
 
             # shift lineno
-            instructions[i].lineno, ins.lineno = ins.lineno, None
+            last_extended_arg.lineno, ins.lineno = ins.lineno, None
 
     arr = bytearray()
     for i, ins in enumerate(instructions):
@@ -119,7 +118,7 @@ def patch(code: types.CodeType) -> types.CodeType:
             arg = _get_offset(target_idx) - 2 - _get_offset(i)
 
         if arg >= 256:
-            arg, *_ = _split_arg(arg)
+            (arg, _), *_ = _split_arg(arg)
 
         arr.extend((ins.opcode, arg))
 
@@ -129,20 +128,19 @@ def patch(code: types.CodeType) -> types.CodeType:
     )
 
 
-def _split_arg(value: int) -> t.Tuple[int, int, int, int]:
+def _split_arg(value: int) -> t.Generator[t.Tuple[int, int], None, None]:
     first, value = divmod(value, 256)
     second, first = divmod(first, 256)
     last, second = divmod(second, 256)
     if last >= 256:
         raise ValueError(f"too big numbers, max is 32 bit")
-    return value, first, second, last
 
-
-def _split_byte(value: int) -> t.Generator[int, None, None]:
-    while value >= 256:
-        value -= 255
-        yield 255
-    yield value
+    if last:
+        yield value, last
+    if second:
+        yield value, second
+    if first:
+        yield value, first
 
 
 def _compress_lineno(firstlineno: int, instructions: t.Iterable[_Instruction]) -> bytes:
@@ -155,13 +153,19 @@ def _compress_lineno(firstlineno: int, instructions: t.Iterable[_Instruction]) -
         roffset, rline = _get_offset(i)-prevoffset, ins.lineno-prevline
 
         if roffset >= 256:
-            for offset in _split_byte(roffset):
-                out.extend((offset, 0))
+            # if you know a more suitable name for 'div' and 'mod'...
+            # ...send a PR. thanks
+            div, mod = divmod(roffset, 255)
+            for _ in range(div):
+                out.extend((255, 0))
+            out.extend((mod, 0))
             if rline < 256:
                 out.extend((0, rline))
         if rline >= 256:
-            for line in _split_byte(rline):
-                out.extend((0, line))
+            div, mod = divmod(rline, 255)
+            for _ in range(div):
+                out.extend((255, 0))
+            out.extend((mod, 0))
             if roffset < 256:
                 out.extend((roffset, 0))
         if roffset < 256 > rline:
