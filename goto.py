@@ -54,14 +54,14 @@ class _Instruction:
 
 
 @dataclass
-class Goto:
+class _Goto:
     target: int
     ins: _Instruction
     block: t.Sequence[int]
 
 
 @dataclass
-class Label:
+class _Label:
     ins: _Instruction
     block: t.Sequence[int]
 
@@ -71,16 +71,20 @@ def patch(code: types.CodeType) -> types.CodeType:
     gotos, labels = _find_goto_and_label(code, instructions)
 
     for label in labels.values():
-        index, _ = _find_by_id(instructions, label.ins.id)
-        del instructions[index]
-        del instructions[index]
-        del instructions[index]
+        index, ins = _find_by_id(instructions, label.ins.id)
+        # delete LOAD_GLOBAL label, LOAD_ATTR, POP_TOP
+        del instructions[index:index + 3]
+
+        jump_referrer = filter(lambda x: x.jump_target == ins.id, instructions)
+        for referrer_ins in jump_referrer:
+            referrer_ins.jump_target = instructions[index].id
+
         label.ins = instructions[index]
 
     for goto in gotos:
         index, _ = _find_by_id(instructions, goto.ins.id)
-        del instructions[index+1]
-        del instructions[index+1]
+        # delete LOAD_ATTR, POP_TOP
+        del instructions[index + 1:index + (1 + 2)]
         _, jump_target_ins = _find_by_id(instructions, labels[goto.target].ins.id)
         goto.ins.opcode = dis.opmap["JUMP_ABSOLUTE"]
         goto.ins.jump_target = jump_target_ins.id
@@ -156,15 +160,13 @@ def _compress_lineno(firstlineno: int, instructions: t.Iterable[_Instruction]) -
             # if you know a more suitable name for 'div' and 'mod'...
             # ...send a PR. thanks
             div, mod = divmod(roffset, 255)
-            for _ in range(div):
-                out.extend((255, 0))
+            out.extend((255, 0) * div)
             out.extend((mod, 0))
             if rline < 256:
                 out.extend((0, rline))
         if rline >= 256:
             div, mod = divmod(rline, 255)
-            for _ in range(div):
-                out.extend((255, 0))
+            out.extend((255, 0) * div)
             out.extend((mod, 0))
             if roffset < 256:
                 out.extend((roffset, 0))
@@ -179,9 +181,9 @@ def _compress_lineno(firstlineno: int, instructions: t.Iterable[_Instruction]) -
 def _find_goto_and_label(
     code: types.CodeType,
     instructions: t.Iterable[_Instruction]
-) -> t.Tuple[t.Sequence[Goto], t.Dict[int, Label]]:
-    gotos: t.List[Goto] = []
-    labels: t.Dict[int, Label] = {}
+) -> t.Tuple[t.Sequence[_Goto], t.Dict[int, _Label]]:
+    gotos: t.List[_Goto] = []
+    labels: t.Dict[int, _Label] = {}
 
     block_stack = []
     for ins in (it := iter(instructions)):
@@ -193,9 +195,9 @@ def _find_goto_and_label(
                 continue
 
             if code.co_names[ins.arg] == "goto":
-                gotos.append(Goto(load_attr.arg, ins, tuple(block_stack)))
+                gotos.append(_Goto(load_attr.arg, ins, tuple(block_stack)))
             elif code.co_names[ins.arg] == "label":
-                labels[load_attr.arg] = Label(ins, tuple(block_stack))
+                labels[load_attr.arg] = _Label(ins, tuple(block_stack))
         elif opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"):
             block_stack.append(ins.id)
         elif opname == "POP_BLOCK" and block_stack:

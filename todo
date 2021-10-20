@@ -1,2 +1,3 @@
-- auto pop/push block
+- implicit pop/push block
 - error if jump into for/with block
+- remove "" and "" in co_names and remap its reference
