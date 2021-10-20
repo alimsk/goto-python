@@ -66,14 +66,23 @@ class _Label:
     block: t.Sequence[int]
 
 
+F = t.TypeVar("F", bound=t.Callable[..., t.Any])
+
+
+def with_goto(func: F) -> F:
+    func.__code__ = patch(func.__code__)
+    return func
+
+
 def patch(code: types.CodeType) -> types.CodeType:
     co_consts = list(code.co_consts)
     instructions = list(_get_instructions(code))
-    gotos, labels = _find_goto_and_label(code, instructions)
+    gotos, labels = _find_statements(code, instructions)
 
     # remove labels and fix its referrer
     for label in labels.values():
         index, ins = _find_by_id(instructions, label.ins.id)
+        assert ins is not None
         # delete LOAD_GLOBAL label, LOAD_ATTR, POP_TOP
         del instructions[index:index + 3]
 
@@ -88,28 +97,70 @@ def patch(code: types.CodeType) -> types.CodeType:
         index, _ = _find_by_id(instructions, goto.ins.id)
         # delete LOAD_ATTR, POP_TOP
         del instructions[index + 1:index + (1 + 2)]
-        _, jump_target_ins = _find_by_id(instructions, labels[goto.target].ins.id)
+
+        target_label = labels.get(goto.target, None)
+        if target_label is None:
+            raise SyntaxError(f"label {code.co_names[goto.target]!r} not defined in this function."
+                              f" at line {_take_min_lineno(instructions, index)}")
+
+        _, jump_target_ins = _find_by_id(instructions, target_label.ins.id)
+
         goto.ins.opcode = dis.opmap["JUMP_ABSOLUTE"]
         goto.ins.jump_target = jump_target_ins.id
 
         # implicit push/pop block
         ins = None
-        for ins in _get_block_ins(instructions, co_consts, goto.block, labels[goto.target].block):
+        for ins in _get_block_ins(instructions, co_consts, goto.block, target_label.block, index):
             instructions.insert(index, ins)
         if ins is not None:
             # shift lineno
             instructions[index].lineno, goto.ins.lineno = goto.ins.lineno, None
 
-    # extended args
-    # see https://docs.python.org/3/library/dis.html#opcode-EXTENDED_ARG
+    return code.replace(
+        co_code=bytes(_compile(instructions)),
+        co_lnotab=bytes(_compress_lineno(code.co_firstlineno, instructions)),
+        co_consts=tuple(co_consts)
+    )
+
+
+def _compile(instructions: t.MutableSequence[_Instruction]) -> t.Generator[int, None, None]:
+    """compile sequence of instructions to bytes"""
+    # extending args must be done right before compilation
+    _extend_args(instructions)
+    for i, ins in enumerate(instructions):
+        arg = ins.arg
+        if ins.opcode in dis.hasjabs:
+            target_i, _ = _find_by_id(instructions, ins.jump_target)
+            assert target_i != -1
+            arg = _get_offset(target_i)
+        elif ins.opcode in dis.hasjrel:
+            target_i, _ = _find_by_id(instructions, ins.jump_target)
+            assert target_i != -1
+            target_offset, curr_offset = _get_offset(target_i), _get_offset(i)
+            arg = max(target_offset, curr_offset) - 2 - min(target_offset, curr_offset)
+
+        if arg >= 256:
+            (arg, _), *_ = _split_arg(arg)
+
+        yield from (ins.opcode, arg)
+
+
+def _extend_args(instructions: t.MutableSequence[_Instruction]) -> None:
+    """
+    extend the argument of every instructions that is greater than 255.
+    see https://docs.python.org/3/library/dis.html#opcode-EXTENDED_ARG
+    """
     for i, ins in (it := enumerate(instructions)):
         arg = ins.arg
         if ins.opcode in dis.hasjabs:
-            target_idx, _ = _find_by_id(instructions, ins.jump_target)
-            arg = _get_offset(target_idx)
+            target_i, _ = _find_by_id(instructions, ins.jump_target)
+            assert target_i != -1
+            arg = _get_offset(target_i)
         elif ins.opcode in dis.hasjrel:
-            target_idx, _ = _find_by_id(instructions, ins.jump_target)
-            arg = _get_offset(target_idx) - 2 - _get_offset(i)
+            target_i, _ = _find_by_id(instructions, ins.jump_target)
+            assert target_i != -1
+            target_offset, curr_offset = _get_offset(target_i), _get_offset(i)
+            arg = max(target_offset, curr_offset) - 2 - min(target_offset, curr_offset)
 
         if arg >= 256:
             for _, extended_argv in _split_arg(arg):
@@ -124,46 +175,28 @@ def patch(code: types.CodeType) -> types.CodeType:
             # shift lineno
             last_extended_arg.lineno, ins.lineno = ins.lineno, None
 
-    # compile instructions
-    arr = bytearray()
-    for i, ins in enumerate(instructions):
-        arg = ins.arg
-        if ins.opcode in dis.hasjabs:
-            target_idx, _ = _find_by_id(instructions, ins.jump_target)
-            arg = _get_offset(target_idx)
-        elif ins.opcode in dis.hasjrel:
-            target_idx, _ = _find_by_id(instructions, ins.jump_target)
-            arg = _get_offset(target_idx) - 2 - _get_offset(i)
-
-        if arg >= 256:
-            (arg, _), *_ = _split_arg(arg)
-
-        arr.extend((ins.opcode, arg))
-
-    return code.replace(
-        co_code=bytes(arr),
-        co_lnotab=_compress_lineno(code.co_firstlineno, instructions),
-        co_consts=tuple(co_consts)
-    )
-
 
 def _get_block_ins(
     instructions: t.Sequence[_Instruction],
     co_consts: t.MutableSequence[t.Any],
     origin: t.Sequence[int],
-    target: t.Sequence[int]
+    target: t.Sequence[int],
+    origin_i: int  # for better error message
 ) -> t.Generator[_Instruction, None, None]:
+    """calculate what instructions are needed to exit/enter a block correctly"""
     if len(origin) > len(target):
         # exit block / goto outer scope
         if origin[:len(target)] != target:
-            raise SyntaxError("jump into different block")
+            raise SyntaxError("jump into different block."
+                              f" at line {_take_min_lineno(instructions, origin_i)}")
 
         for ins_id in reversed(origin[len(target):]):
             _, ins = _find_by_id(instructions, ins_id)
+            assert ins is not None
             opname = dis.opname[ins.opcode]
             if opname == "SETUP_FINALLY":
                 yield _Instruction(dis.opmap["POP_BLOCK"], 0)
-            elif opname in "SETUP_WITH":
+            elif opname == "SETUP_WITH":
                 if None not in co_consts:
                     co_consts.append(None)
                 yield from reversed((
@@ -196,10 +229,12 @@ def _get_block_ins(
     elif len(origin) < len(target):
         # enter block / goto inner scope
         if target[:len(origin)] != origin:
-            raise SyntaxError("jump into different block")
+            raise SyntaxError("jump into different block."
+                              f" at line {_take_min_lineno(instructions, origin_i)}")
 
         for ins_id in target[len(origin):]:
             _, ins = _find_by_id(instructions, ins_id)
+            assert ins is not None
             opname = dis.opname[ins.opcode]
             if opname == "SETUP_FINALLY":
                 ins_copy = _Instruction(ins.opcode, ins.arg)
@@ -207,17 +242,29 @@ def _get_block_ins(
                 yield ins_copy
             elif opname in ("SETUP_WITH", "SETUP_ASYNC_WITH",
                             "FOR_ITER"):
-                raise SyntaxError("can't jump into 'with' or 'for' block")
+                raise SyntaxError("can't jump into 'with' or 'for' block."
+                                  f" at line {_take_min_lineno(instructions, origin_i)}")
             else:
                 assert False, f"not a jump instruction: {opname}"
     elif origin == target:
         # on the same block / normal goto
         pass
     else:
-        raise SyntaxError("jump into different block")
+        raise SyntaxError("jump into different block."
+                          f" at line {_take_min_lineno(instructions, origin_i)}")
 
 
 def _split_arg(value: int) -> t.Generator[t.Tuple[int, int], None, None]:
+    """
+    split `value` to three extended_arg argument.
+    see https://docs.python.org/3/library/dis.html#opcode-EXTENDED_ARG
+
+    EXTENDED_ARG 1
+    JUMP_ABSOLUTE 23
+
+    the first yield value is the remainder value, used in JUMP_ABSOLUTE, and will remain the same.
+    the second yield value is extended extended argument, used in EXTENDED_ARG.
+    """
     first, value = divmod(value, 256)
     second, first = divmod(first, 256)
     last, second = divmod(second, 256)
@@ -232,9 +279,11 @@ def _split_arg(value: int) -> t.Generator[t.Tuple[int, int], None, None]:
         yield value, first
 
 
-def _compress_lineno(firstlineno: int, instructions: t.Iterable[_Instruction]) -> bytes:
-    out = bytearray()
-
+def _compress_lineno(
+    firstlineno: int,
+    instructions: t.Iterable[_Instruction]
+) -> t.Generator[int, None, None]:
+    """compress line number to line number table (co_lnotab)"""
     prevoffset = 0
     prevline = firstlineno
     for i, ins in filter(lambda x: x[1].lineno is not None, enumerate(instructions)):
@@ -244,28 +293,27 @@ def _compress_lineno(firstlineno: int, instructions: t.Iterable[_Instruction]) -
         if roffset >= 256:
             # send a PR if you know a more suitable name for 'div' and 'mod'
             div, mod = divmod(roffset, 255)
-            out.extend((255, 0) * div)
-            out.extend((mod, 0))
+            yield from (255, 0) * div
+            yield from (mod, 0)
             if rline < 256:
-                out.extend((0, rline))
+                yield from (0, rline)
         if rline >= 256:
             div, mod = divmod(rline, 255)
-            out.extend((255, 0) * div)
-            out.extend((mod, 0))
+            yield from (255, 0) * div
+            yield from (mod, 0)
             if roffset < 256:
-                out.extend((roffset, 0))
+                yield from (roffset, 0)
         if roffset < 256 > rline:
-            out.extend((roffset, rline))
+            yield from (roffset, rline)
 
         prevoffset, prevline = _get_offset(i), ins.lineno
 
-    return bytes(out)
 
-
-def _find_goto_and_label(
+def _find_statements(
     code: types.CodeType,
     instructions: t.Sequence[_Instruction]
 ) -> t.Tuple[t.Sequence[_Goto], t.Dict[int, _Label]]:
+    """find gotos and labels"""
     gotos: t.List[_Goto] = []
     labels: t.Dict[int, _Label] = {}
 
@@ -287,6 +335,10 @@ def _find_goto_and_label(
             if code.co_names[ins.arg] == "goto":
                 gotos.append(_Goto(load_attr.arg, ins, tuple(block_stack)))
             elif code.co_names[ins.arg] == "label":
+                if load_attr.arg in labels:
+                    raise SyntaxError(f"ambiguous label name: {code.co_names[load_attr.arg]!r}."
+                                      f" at line {_take_min_lineno(instructions, i)}")
+
                 labels[load_attr.arg] = _Label(ins, tuple(block_stack))
         elif opname in ("SETUP_FINALLY", "SETUP_WITH",
                         "SETUP_ASYNC_WITH", "FOR_ITER"):
@@ -300,15 +352,25 @@ def _find_goto_and_label(
 
 
 def _get_instructions(code: types.CodeType) -> t.Generator[_Instruction, None, None]:
-    instructions = tuple(map(_Instruction.create, dis.get_instructions(code)))
+    instructions = list(map(_Instruction.create, dis.get_instructions(code)))
     linemap = dict(dis.findlinestarts(code))
-    for i, ins in (it := enumerate(instructions)):
+
+    for i, ins in enumerate(instructions):
         if ins.opcode in dis.hasjabs:
-            ins.jump_target = instructions[ins.arg // 2].id
+            jump_target_ins = None
+            for jump_target_ins in instructions[_get_index(ins.arg):]:
+                if dis.opname[jump_target_ins.opcode] != "EXTENDED_ARG":
+                    break
+            assert jump_target_ins is not None
+            ins.jump_target = jump_target_ins.id
         elif ins.opcode in dis.hasjrel:
-            ins.jump_target = instructions[(_get_offset(i) + 2 + ins.arg) // 2].id
+            jump_target_ins = None
+            for jump_target_ins in instructions[_get_index(_get_offset(i) + 2 + ins.arg):]:
+                if dis.opname[jump_target_ins.opcode] != "EXTENDED_ARG":
+                    break
+            assert jump_target_ins is not None
+            ins.jump_target = jump_target_ins.id
         elif dis.opname[ins.opcode] == "EXTENDED_ARG":
-            # TODO: support for chained extended_args
             offset = _get_offset(i)
             if (lineno := linemap.get(offset, None)) is not None:
                 linemap[offset + 2] = lineno
@@ -321,14 +383,36 @@ def _get_instructions(code: types.CodeType) -> t.Generator[_Instruction, None, N
         yield ins
 
 
+def _take_min_lineno(instructions: t.Sequence[_Instruction], index: int) -> int:
+    if (lineno := instructions[index].lineno) is not None:
+        return lineno
+
+    for ins in reversed(instructions[:index]):
+        if ins.lineno is not None:
+            return ins.lineno
+    assert False, "is not working"
+
+
 def _get_offset(x: int) -> int:
-    """get offset from index"""
+    """
+    get offset from index. this function is intended to make it more clear.
+    just multiply by 2 since python 3.6 and above always uses 2 bytes for each instructions
+    """
     return x * 2
 
 
-def _find_by_id(instructions: t.Iterable[_Instruction], id: int) -> t.Tuple[int, _Instruction]:
+def _get_index(x: int) -> int:
+    """
+    get index from offset. this function is intended to make it more clear.
+    just divide by 2 since python 3.6 and above always uses 2 bytes for each instructions
+    """
+    return x // 2
+
+
+def _find_by_id(instructions: t.Iterable[_Instruction], id: int) -> t.Tuple[int, t.Optional[_Instruction]]:
+    """find instruction by its id, returns the index and instruction"""
     for i, ins in enumerate(instructions):
         if ins.id == id:
             return i, ins
 
-    raise IndexError("instruction id not found")
+    return -1, None

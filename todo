@@ -1,9 +1,13 @@
 - already done
 * not done
+! can't be done
+? not sure
 
 - implicit pop/push block
 - error if jump into for/with block
-* remove "goto" and "label" in co_names and remap its reference
-* support labeled for/while, and break specific label
-* refactor code, use generator instead of buffer so it can be more efficient and fast ofc
-* more detailed error message, e.g "label 'x' is not defined in this function. at line 14"
+? remove "goto", "label", and label names from co_names, then remap other references
+! support labeled for/while, and break/continue specific label, this can't be done because...
+  ...there is no way to know if an instruction is the start of a while block
+- refactor code, use generator instead of buffer so it can be more efficient and fast ofc
+- more detailed error message, e.g "label 'x' is not defined in this function. at line 14"
+- add comments and some docs
