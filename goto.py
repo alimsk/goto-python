@@ -67,9 +67,11 @@ class _Label:
 
 
 def patch(code: types.CodeType) -> types.CodeType:
+    co_consts = list(code.co_consts)
     instructions = list(_get_instructions(code))
     gotos, labels = _find_goto_and_label(code, instructions)
 
+    # remove labels and fix its referrer
     for label in labels.values():
         index, ins = _find_by_id(instructions, label.ins.id)
         # delete LOAD_GLOBAL label, LOAD_ATTR, POP_TOP
@@ -81,6 +83,7 @@ def patch(code: types.CodeType) -> types.CodeType:
 
         label.ins = instructions[index]
 
+    # remove gotos and refer to its target/label
     for goto in gotos:
         index, _ = _find_by_id(instructions, goto.ins.id)
         # delete LOAD_ATTR, POP_TOP
@@ -89,6 +92,16 @@ def patch(code: types.CodeType) -> types.CodeType:
         goto.ins.opcode = dis.opmap["JUMP_ABSOLUTE"]
         goto.ins.jump_target = jump_target_ins.id
 
+        # implicit push/pop block
+        ins = None
+        for ins in _get_block_ins(instructions, co_consts, goto.block, labels[goto.target].block):
+            instructions.insert(index, ins)
+        if ins is not None:
+            # shift lineno
+            instructions[index].lineno, goto.ins.lineno = goto.ins.lineno, None
+
+    # extended args
+    # see https://docs.python.org/3/library/dis.html#opcode-EXTENDED_ARG
     for i, ins in (it := enumerate(instructions)):
         arg = ins.arg
         if ins.opcode in dis.hasjabs:
@@ -111,6 +124,7 @@ def patch(code: types.CodeType) -> types.CodeType:
             # shift lineno
             last_extended_arg.lineno, ins.lineno = ins.lineno, None
 
+    # compile instructions
     arr = bytearray()
     for i, ins in enumerate(instructions):
         arg = ins.arg
@@ -128,8 +142,79 @@ def patch(code: types.CodeType) -> types.CodeType:
 
     return code.replace(
         co_code=bytes(arr),
-        co_lnotab=_compress_lineno(code.co_firstlineno, instructions)
+        co_lnotab=_compress_lineno(code.co_firstlineno, instructions),
+        co_consts=tuple(co_consts)
     )
+
+
+def _get_block_ins(
+    instructions: t.Sequence[_Instruction],
+    co_consts: t.MutableSequence[t.Any],
+    origin: t.Sequence[int],
+    target: t.Sequence[int]
+) -> t.Generator[_Instruction, None, None]:
+    if len(origin) > len(target):
+        # exit block / goto outer scope
+        if origin[:len(target)] != target:
+            raise SyntaxError("jump into different block")
+
+        for ins_id in reversed(origin[len(target):]):
+            _, ins = _find_by_id(instructions, ins_id)
+            opname = dis.opname[ins.opcode]
+            if opname == "SETUP_FINALLY":
+                yield _Instruction(dis.opmap["POP_BLOCK"], 0)
+            elif opname in "SETUP_WITH":
+                if None not in co_consts:
+                    co_consts.append(None)
+                yield from reversed((
+                    _Instruction(dis.opmap["POP_BLOCK"], 0),
+                    _Instruction(dis.opmap["LOAD_CONST"], co_consts.index(None)),
+                    _Instruction(dis.opmap["DUP_TOP"], 0),
+                    _Instruction(dis.opmap["DUP_TOP"], 0),
+                    _Instruction(dis.opmap["CALL_FUNCTION"], 3),
+                    _Instruction(dis.opmap["POP_TOP"], 0)
+                ))
+            elif opname == "SETUP_ASYNC_WITH":
+                if None not in co_consts:
+                    co_consts.append(None)
+                none_i = co_consts.index(None)
+                yield from reversed((
+                    _Instruction(dis.opmap["POP_BLOCK"], 0),
+                    _Instruction(dis.opmap["LOAD_CONST"], none_i),
+                    _Instruction(dis.opmap["DUP_TOP"], 0),
+                    _Instruction(dis.opmap["DUP_TOP"], 0),
+                    _Instruction(dis.opmap["CALL_FUNCTION"], 3),
+                    _Instruction(dis.opmap["GET_AWAITABLE"], 0),
+                    _Instruction(dis.opmap["LOAD_CONST"], none_i),
+                    _Instruction(dis.opmap["YIELD_FROM"], 0),
+                    _Instruction(dis.opmap["POP_TOP"], 0)
+                ))
+            elif opname == "FOR_ITER":
+                yield _Instruction(dis.opmap["POP_TOP"], 0)
+            else:
+                assert False, f"not a jump instruction: {opname}"
+    elif len(origin) < len(target):
+        # enter block / goto inner scope
+        if target[:len(origin)] != origin:
+            raise SyntaxError("jump into different block")
+
+        for ins_id in target[len(origin):]:
+            _, ins = _find_by_id(instructions, ins_id)
+            opname = dis.opname[ins.opcode]
+            if opname == "SETUP_FINALLY":
+                ins_copy = _Instruction(ins.opcode, ins.arg)
+                ins_copy.jump_target = ins.jump_target
+                yield ins_copy
+            elif opname in ("SETUP_WITH", "SETUP_ASYNC_WITH",
+                            "FOR_ITER"):
+                raise SyntaxError("can't jump into 'with' or 'for' block")
+            else:
+                assert False, f"not a jump instruction: {opname}"
+    elif origin == target:
+        # on the same block / normal goto
+        pass
+    else:
+        raise SyntaxError("jump into different block")
 
 
 def _split_arg(value: int) -> t.Generator[t.Tuple[int, int], None, None]:
@@ -157,8 +242,7 @@ def _compress_lineno(firstlineno: int, instructions: t.Iterable[_Instruction]) -
         roffset, rline = _get_offset(i)-prevoffset, ins.lineno-prevline
 
         if roffset >= 256:
-            # if you know a more suitable name for 'div' and 'mod'...
-            # ...send a PR. thanks
+            # send a PR if you know a more suitable name for 'div' and 'mod'
             div, mod = divmod(roffset, 255)
             out.extend((255, 0) * div)
             out.extend((mod, 0))
@@ -180,16 +264,22 @@ def _compress_lineno(firstlineno: int, instructions: t.Iterable[_Instruction]) -
 
 def _find_goto_and_label(
     code: types.CodeType,
-    instructions: t.Iterable[_Instruction]
+    instructions: t.Sequence[_Instruction]
 ) -> t.Tuple[t.Sequence[_Goto], t.Dict[int, _Label]]:
     gotos: t.List[_Goto] = []
     labels: t.Dict[int, _Label] = {}
 
-    block_stack = []
-    for ins in (it := iter(instructions)):
+    for_end: t.Set[int] = set()  # end FOR_ITER id
+    block_stack: t.List[int] = []  # block start id
+    for i, ins in enumerate(instructions):
+        if ins.id in for_end:
+            for_end.remove(ins.id)
+            if block_stack:
+                block_stack.pop()
+
         opname = dis.opname[ins.opcode]
         if opname in ("LOAD_GLOBAL", "LOAD_NAME"):
-            load_attr, pop_top = next(it), next(it)
+            load_attr, pop_top = instructions[i + 1], instructions[i + 2]
             if not (dis.opname[load_attr.opcode] == "LOAD_ATTR" and
                     dis.opname[pop_top.opcode] == "POP_TOP"):
                 continue
@@ -198,8 +288,11 @@ def _find_goto_and_label(
                 gotos.append(_Goto(load_attr.arg, ins, tuple(block_stack)))
             elif code.co_names[ins.arg] == "label":
                 labels[load_attr.arg] = _Label(ins, tuple(block_stack))
-        elif opname in ("SETUP_FINALLY", "SETUP_WITH", "SETUP_ASYNC_WITH"):
+        elif opname in ("SETUP_FINALLY", "SETUP_WITH",
+                        "SETUP_ASYNC_WITH", "FOR_ITER"):
             block_stack.append(ins.id)
+            if opname == "FOR_ITER":
+                for_end.add(ins.jump_target)
         elif opname == "POP_BLOCK" and block_stack:
             block_stack.pop()
 

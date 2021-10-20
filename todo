@@ -1,3 +1,9 @@
+- already done
+* not done
+
 - implicit pop/push block
 - error if jump into for/with block
-- remove "" and "" in co_names and remap its reference
+* remove "goto" and "label" in co_names and remap its reference
+* support labeled for/while, and break specific label
+* refactor code, use generator instead of buffer so it can be more efficient and fast ofc
+* more detailed error message, e.g "label 'x' is not defined in this function. at line 14"
