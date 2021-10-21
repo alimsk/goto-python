@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from sys import version_info
 import typing as t
 import types
 import dis
@@ -77,7 +78,7 @@ def with_goto(func: F) -> F:
 def patch(code: types.CodeType) -> types.CodeType:
     co_consts = list(code.co_consts)
     instructions = list(_get_instructions(code))
-    gotos, labels = _find_statements(code, instructions)
+    gotos, labels = _find_goto_and_label(code, instructions)
 
     # remove labels and fix its referrer
     for label in labels.values():
@@ -118,7 +119,7 @@ def patch(code: types.CodeType) -> types.CodeType:
 
     return code.replace(
         co_code=bytes(_compile(instructions)),
-        co_lnotab=bytes(_compress_lineno(code.co_firstlineno, instructions)),
+        co_lnotab=bytes(_encode_lineno(code.co_firstlineno, instructions)),
         co_consts=tuple(co_consts)
     )
 
@@ -176,6 +177,10 @@ def _extend_args(instructions: t.MutableSequence[_Instruction]) -> None:
             last_extended_arg.lineno, ins.lineno = ins.lineno, None
 
 
+def _support_implicit_block() -> bool:
+    return version_info >= (3, 9)
+
+
 def _get_block_ins(
     instructions: t.Sequence[_Instruction],
     co_consts: t.MutableSequence[t.Any],
@@ -194,38 +199,39 @@ def _get_block_ins(
             _, ins = _find_by_id(instructions, ins_id)
             assert ins is not None
             opname = dis.opname[ins.opcode]
-            if opname == "SETUP_FINALLY":
-                yield _Instruction(dis.opmap["POP_BLOCK"], 0)
-            elif opname == "SETUP_WITH":
-                if None not in co_consts:
-                    co_consts.append(None)
-                yield from reversed((
-                    _Instruction(dis.opmap["POP_BLOCK"], 0),
-                    _Instruction(dis.opmap["LOAD_CONST"], co_consts.index(None)),
-                    _Instruction(dis.opmap["DUP_TOP"], 0),
-                    _Instruction(dis.opmap["DUP_TOP"], 0),
-                    _Instruction(dis.opmap["CALL_FUNCTION"], 3),
-                    _Instruction(dis.opmap["POP_TOP"], 0)
-                ))
-            elif opname == "SETUP_ASYNC_WITH":
-                if None not in co_consts:
-                    co_consts.append(None)
-                none_i = co_consts.index(None)
-                yield from reversed((
-                    _Instruction(dis.opmap["POP_BLOCK"], 0),
-                    _Instruction(dis.opmap["LOAD_CONST"], none_i),
-                    _Instruction(dis.opmap["DUP_TOP"], 0),
-                    _Instruction(dis.opmap["DUP_TOP"], 0),
-                    _Instruction(dis.opmap["CALL_FUNCTION"], 3),
-                    _Instruction(dis.opmap["GET_AWAITABLE"], 0),
-                    _Instruction(dis.opmap["LOAD_CONST"], none_i),
-                    _Instruction(dis.opmap["YIELD_FROM"], 0),
-                    _Instruction(dis.opmap["POP_TOP"], 0)
-                ))
+            if _support_implicit_block():
+                if opname == "SETUP_FINALLY":
+                    yield _Instruction(dis.opmap["POP_BLOCK"], 0)
+                elif opname == "SETUP_WITH":
+                    if None not in co_consts:
+                        co_consts.append(None)
+                    yield from reversed((
+                        _Instruction(dis.opmap["POP_BLOCK"], 0),
+                        _Instruction(dis.opmap["LOAD_CONST"], co_consts.index(None)),
+                        _Instruction(dis.opmap["DUP_TOP"], 0),
+                        _Instruction(dis.opmap["DUP_TOP"], 0),
+                        _Instruction(dis.opmap["CALL_FUNCTION"], 3),
+                        _Instruction(dis.opmap["POP_TOP"], 0)
+                    ))
+                elif opname == "SETUP_ASYNC_WITH":
+                    if None not in co_consts:
+                        co_consts.append(None)
+                    none_i = co_consts.index(None)
+                    yield from reversed((
+                        _Instruction(dis.opmap["POP_BLOCK"], 0),
+                        _Instruction(dis.opmap["LOAD_CONST"], none_i),
+                        _Instruction(dis.opmap["DUP_TOP"], 0),
+                        _Instruction(dis.opmap["DUP_TOP"], 0),
+                        _Instruction(dis.opmap["CALL_FUNCTION"], 3),
+                        _Instruction(dis.opmap["GET_AWAITABLE"], 0),
+                        _Instruction(dis.opmap["LOAD_CONST"], none_i),
+                        _Instruction(dis.opmap["YIELD_FROM"], 0),
+                        _Instruction(dis.opmap["POP_TOP"], 0)
+                    ))
             elif opname == "FOR_ITER":
                 yield _Instruction(dis.opmap["POP_TOP"], 0)
             else:
-                assert False, f"not a jump instruction: {opname}"
+                raise SyntaxError("implicit pop block is not supported below python 3.9")
     elif len(origin) < len(target):
         # enter block / goto inner scope
         if target[:len(origin)] != origin:
@@ -236,7 +242,7 @@ def _get_block_ins(
             _, ins = _find_by_id(instructions, ins_id)
             assert ins is not None
             opname = dis.opname[ins.opcode]
-            if opname == "SETUP_FINALLY":
+            if opname == "SETUP_FINALLY" and _support_implicit_block():
                 ins_copy = _Instruction(ins.opcode, ins.arg)
                 ins_copy.jump_target = ins.jump_target
                 yield ins_copy
@@ -245,7 +251,7 @@ def _get_block_ins(
                 raise SyntaxError("can't jump into 'with' or 'for' block."
                                   f" at line {_take_min_lineno(instructions, origin_i)}")
             else:
-                assert False, f"not a jump instruction: {opname}"
+                raise SyntaxError("implicit push block is not supported below python 3.9")
     elif origin == target:
         # on the same block / normal goto
         pass
@@ -279,11 +285,11 @@ def _split_arg(value: int) -> t.Generator[t.Tuple[int, int], None, None]:
         yield value, first
 
 
-def _compress_lineno(
+def _encode_lineno(
     firstlineno: int,
     instructions: t.Iterable[_Instruction]
 ) -> t.Generator[int, None, None]:
-    """compress line number to line number table (co_lnotab)"""
+    """encode line number to line number table (co_lnotab)"""
     prevoffset = 0
     prevline = firstlineno
     for i, ins in filter(lambda x: x[1].lineno is not None, enumerate(instructions)):
@@ -309,7 +315,7 @@ def _compress_lineno(
         prevoffset, prevline = _get_offset(i), ins.lineno
 
 
-def _find_statements(
+def _find_goto_and_label(
     code: types.CodeType,
     instructions: t.Sequence[_Instruction]
 ) -> t.Tuple[t.Sequence[_Goto], t.Dict[int, _Label]]:
