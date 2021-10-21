@@ -352,7 +352,7 @@ def _find_statements(
 
 
 def _get_instructions(code: types.CodeType) -> t.Generator[_Instruction, None, None]:
-    instructions = list(map(_Instruction.create, dis.get_instructions(code)))
+    instructions = tuple(map(_Instruction.create, dis.get_instructions(code)))
     linemap = dict(dis.findlinestarts(code))
 
     for i, ins in enumerate(instructions):

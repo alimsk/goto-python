@@ -1,3 +1,6 @@
 /main.py
 __pycache__/
 .idea/
+/dist/
+/goto_python.egg-info/
+/build/
