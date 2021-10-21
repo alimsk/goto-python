@@ -1,6 +1,6 @@
 # Installation
 ```
-pip install goto-python
+pip install -U goto-python
 ```
 tested in python 3.9 and 3.8.
 
