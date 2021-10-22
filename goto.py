@@ -199,7 +199,9 @@ def _get_block_ins(
             _, ins = _find_by_id(instructions, ins_id)
             assert ins is not None
             opname = dis.opname[ins.opcode]
-            if _support_implicit_block():
+            if opname == "FOR_ITER":
+                yield _Instruction(dis.opmap["POP_TOP"], 0)
+            elif _support_implicit_block():
                 if opname == "SETUP_FINALLY":
                     yield _Instruction(dis.opmap["POP_BLOCK"], 0)
                 elif opname == "SETUP_WITH":
@@ -228,8 +230,6 @@ def _get_block_ins(
                         _Instruction(dis.opmap["YIELD_FROM"], 0),
                         _Instruction(dis.opmap["POP_TOP"], 0)
                     ))
-            elif opname == "FOR_ITER":
-                yield _Instruction(dis.opmap["POP_TOP"], 0)
             else:
                 raise SyntaxError("implicit pop block is not supported below python 3.9")
     elif len(origin) < len(target):
