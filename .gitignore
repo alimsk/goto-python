@@ -4,3 +4,5 @@ __pycache__/
 /dist/
 /goto_python.egg-info/
 /build/
+/.pytest_cache
+.mypy_cache/

@@ -21,22 +21,17 @@ class _Instruction:
     jump_target: t.Optional[int]  # target id
     lineno: t.Optional[int]
 
-    # protected attribute
-    _id: int = 0
-
     def __init__(
         self,
         opcode: int,
         arg: int
     ) -> None:
-        self.id = _Instruction._id
+        self.id = id(self)
         self.opcode = opcode
         self.arg = arg
 
         self.jump_target = None
         self.lineno = None
-
-        _Instruction._id += 1
 
     def __repr__(self) -> str:
         return ("Instruction("
@@ -117,11 +112,24 @@ def patch(code: types.CodeType) -> types.CodeType:
             # shift lineno
             instructions[index].lineno, goto.ins.lineno = goto.ins.lineno, None
 
-    return code.replace(
-        co_code=bytes(_compile(instructions)),
-        co_lnotab=bytes(_encode_lineno(code.co_firstlineno, instructions)),
-        co_consts=tuple(co_consts)
-    )
+    if _is_39():
+        return code.replace(
+            co_code=bytes(_compile(instructions)),
+            co_lnotab=bytes(_encode_lineno(code.co_firstlineno, instructions)),
+            co_consts=tuple(co_consts)
+        )
+    else:
+        return code.replace(
+            co_code=bytes(_compile(instructions)),
+            co_lnotab=bytes(_encode_lineno(code.co_firstlineno, instructions)),
+            co_consts=tuple(co_consts)
+        )
+
+
+def _is_39() -> bool:
+    if version_info[:2] not in ((3, 9), (3, 10)):
+        raise NotImplementedError("goto requires python 3.9 or above")
+    return version_info[:2] == (3, 9)
 
 
 def _compile(instructions: t.MutableSequence[_Instruction]) -> t.Generator[int, None, None]:
@@ -140,7 +148,7 @@ def _compile(instructions: t.MutableSequence[_Instruction]) -> t.Generator[int, 
             target_offset, curr_offset = _get_offset(target_i), _get_offset(i)
             arg = max(target_offset, curr_offset) - 2 - min(target_offset, curr_offset)
 
-        if arg >= 256:
+        if arg >= 0x100:
             (arg, _), *_ = _split_arg(arg)
 
         yield from (ins.opcode, arg)
@@ -148,7 +156,7 @@ def _compile(instructions: t.MutableSequence[_Instruction]) -> t.Generator[int, 
 
 def _extend_args(instructions: t.MutableSequence[_Instruction]) -> None:
     """
-    extend the argument of every instructions that is greater than 255.
+    extend the argument of every instructions that is greater than 0xff.
     see https://docs.python.org/3/library/dis.html#opcode-EXTENDED_ARG
     """
     for i, ins in (it := enumerate(instructions)):
@@ -163,7 +171,7 @@ def _extend_args(instructions: t.MutableSequence[_Instruction]) -> None:
             target_offset, curr_offset = _get_offset(target_i), _get_offset(i)
             arg = max(target_offset, curr_offset) - 2 - min(target_offset, curr_offset)
 
-        if arg >= 256:
+        if arg >= 0x100:
             for _, extended_argv in _split_arg(arg):
                 instructions.insert(i, _Instruction(dis.opmap["EXTENDED_ARG"], extended_argv))
                 next(it)
@@ -175,10 +183,6 @@ def _extend_args(instructions: t.MutableSequence[_Instruction]) -> None:
 
             # shift lineno
             last_extended_arg.lineno, ins.lineno = ins.lineno, None
-
-
-def _support_implicit_block() -> bool:
-    return version_info >= (3, 9)
 
 
 def _get_block_ins(
@@ -195,63 +199,64 @@ def _get_block_ins(
             raise SyntaxError("jump into different block."
                               f" at line {_take_min_lineno(instructions, origin_i)}")
 
-        for ins_id in reversed(origin[len(target):]):
+        for ins_id in origin[len(target):]:
             _, ins = _find_by_id(instructions, ins_id)
             assert ins is not None
             opname = dis.opname[ins.opcode]
             if opname == "FOR_ITER":
                 yield _Instruction(dis.opmap["POP_TOP"], 0)
-            elif _support_implicit_block():
-                if opname == "SETUP_FINALLY":
-                    yield _Instruction(dis.opmap["POP_BLOCK"], 0)
-                elif opname == "SETUP_WITH":
-                    if None not in co_consts:
-                        co_consts.append(None)
-                    yield from reversed((
-                        _Instruction(dis.opmap["POP_BLOCK"], 0),
-                        _Instruction(dis.opmap["LOAD_CONST"], co_consts.index(None)),
-                        _Instruction(dis.opmap["DUP_TOP"], 0),
-                        _Instruction(dis.opmap["DUP_TOP"], 0),
-                        _Instruction(dis.opmap["CALL_FUNCTION"], 3),
-                        _Instruction(dis.opmap["POP_TOP"], 0)
-                    ))
-                elif opname == "SETUP_ASYNC_WITH":
-                    if None not in co_consts:
-                        co_consts.append(None)
-                    none_i = co_consts.index(None)
-                    yield from reversed((
-                        _Instruction(dis.opmap["POP_BLOCK"], 0),
-                        _Instruction(dis.opmap["LOAD_CONST"], none_i),
-                        _Instruction(dis.opmap["DUP_TOP"], 0),
-                        _Instruction(dis.opmap["DUP_TOP"], 0),
-                        _Instruction(dis.opmap["CALL_FUNCTION"], 3),
-                        _Instruction(dis.opmap["GET_AWAITABLE"], 0),
-                        _Instruction(dis.opmap["LOAD_CONST"], none_i),
-                        _Instruction(dis.opmap["YIELD_FROM"], 0),
-                        _Instruction(dis.opmap["POP_TOP"], 0)
-                    ))
+            elif opname == "SETUP_FINALLY":
+                yield _Instruction(dis.opmap["POP_BLOCK"], 0)
+            elif opname == "JUMP_IF_NOT_EXC_MATCH":
+                yield _Instruction(dis.opmap["POP_EXCEPT"], 0)
+            elif opname == "SETUP_WITH":
+                if None not in co_consts:
+                    co_consts.append(None)
+                yield from reversed((
+                    _Instruction(dis.opmap["POP_BLOCK"], 0),
+                    _Instruction(dis.opmap["LOAD_CONST"], co_consts.index(None)),
+                    _Instruction(dis.opmap["DUP_TOP"], 0),
+                    _Instruction(dis.opmap["DUP_TOP"], 0),
+                    _Instruction(dis.opmap["CALL_FUNCTION"], 3),
+                    _Instruction(dis.opmap["POP_TOP"], 0)
+                ))
+            elif opname == "SETUP_ASYNC_WITH":
+                if None not in co_consts:
+                    co_consts.append(None)
+                none_i = co_consts.index(None)
+                yield from reversed((
+                    _Instruction(dis.opmap["POP_BLOCK"], 0),
+                    _Instruction(dis.opmap["LOAD_CONST"], none_i),
+                    _Instruction(dis.opmap["DUP_TOP"], 0),
+                    _Instruction(dis.opmap["DUP_TOP"], 0),
+                    _Instruction(dis.opmap["CALL_FUNCTION"], 3),
+                    _Instruction(dis.opmap["GET_AWAITABLE"], 0),
+                    _Instruction(dis.opmap["LOAD_CONST"], none_i),
+                    _Instruction(dis.opmap["YIELD_FROM"], 0),
+                    _Instruction(dis.opmap["POP_TOP"], 0)
+                ))
             else:
-                raise SyntaxError("implicit pop block is not supported below python 3.9")
+                assert False, f"unsupported block instruction: {opname}"
     elif len(origin) < len(target):
         # enter block / goto inner scope
         if target[:len(origin)] != origin:
             raise SyntaxError("jump into different block."
                               f" at line {_take_min_lineno(instructions, origin_i)}")
 
-        for ins_id in target[len(origin):]:
+        for ins_id in reversed(target[len(origin):]):
             _, ins = _find_by_id(instructions, ins_id)
             assert ins is not None
             opname = dis.opname[ins.opcode]
-            if opname == "SETUP_FINALLY" and _support_implicit_block():
+            if opname == "SETUP_FINALLY":
                 ins_copy = _Instruction(ins.opcode, ins.arg)
                 ins_copy.jump_target = ins.jump_target
                 yield ins_copy
             elif opname in ("SETUP_WITH", "SETUP_ASYNC_WITH",
-                            "FOR_ITER"):
-                raise SyntaxError("can't jump into 'with' or 'for' block."
+                            "FOR_ITER", "JUMP_IF_NOT_EXC_MATCH"):
+                raise SyntaxError("can't jump into 'with', 'for' or 'except' block."
                                   f" at line {_take_min_lineno(instructions, origin_i)}")
             else:
-                raise SyntaxError("implicit push block is not supported below python 3.9")
+                assert False, f"unsupported block instruction: {opname}"
     elif origin == target:
         # on the same block / normal goto
         pass
@@ -271,10 +276,10 @@ def _split_arg(value: int) -> t.Generator[t.Tuple[int, int], None, None]:
     the first yield value is the remainder value, used in JUMP_ABSOLUTE, and will remain the same.
     the second yield value is extended extended argument, used in EXTENDED_ARG.
     """
-    first, value = divmod(value, 256)
-    second, first = divmod(first, 256)
-    last, second = divmod(second, 256)
-    if last >= 256:
+    first, value = divmod(value, 0x100)
+    second, first = divmod(first, 0x100)
+    last, second = divmod(second, 0x100)
+    if last >= 0x100:
         raise ValueError(f"too big numbers, max is 32 bit")
 
     if last:
@@ -285,34 +290,52 @@ def _split_arg(value: int) -> t.Generator[t.Tuple[int, int], None, None]:
         yield value, first
 
 
-def _encode_lineno(
+def _encode_lineno_39(
     firstlineno: int,
     instructions: t.Iterable[_Instruction]
 ) -> t.Generator[int, None, None]:
     """encode line number to line number table (co_lnotab)"""
+    # TODO: fix line number can be decreasing
+    # disassemble the below code
+    # 1 def x():
+    # 2     print(
+    # 3       a(),
+    # 4       b()
+    # 2     )
     prevoffset = 0
     prevline = firstlineno
     for i, ins in filter(lambda x: x[1].lineno is not None, enumerate(instructions)):
-        # range offset, range line
+        ## range offset and range line ##
+        # roffset is non-negative, it can be more than 0xff
+        # rline can be negative, it is less than or equal to 0xff
         roffset, rline = _get_offset(i)-prevoffset, ins.lineno-prevline
 
-        if roffset >= 256:
+        if roffset >= 0x100:
             # send a PR if you know a more suitable name for 'div' and 'mod'
-            div, mod = divmod(roffset, 255)
-            yield from (255, 0) * div
+            div, mod = divmod(roffset, 0xff)
+            yield from (0xff, 0) * div
             yield from (mod, 0)
-            if rline < 256:
-                yield from (0, rline)
-        if rline >= 256:
-            div, mod = divmod(rline, 255)
-            yield from (255, 0) * div
-            yield from (mod, 0)
-            if roffset < 256:
-                yield from (roffset, 0)
-        if roffset < 256 > rline:
-            yield from (roffset, rline)
+        else:
+            yield from (roffset, 0)
+
+        if rline >= 0x80:
+            # not fit for half a byte
+            div, mod = divmod(rline, 0x7f)
+            yield from (0, 0x7f) * div
+            yield from (0, mod)
+        elif rline < 0:
+            yield from (0, 0x100 + rline)
+        else:
+            yield from (0, rline)
 
         prevoffset, prevline = _get_offset(i), ins.lineno
+
+
+if _is_39():
+    _encode_lineno = _encode_lineno_39
+else:
+    # TODO: implement 3.10
+    _encode_lineno = _encode_lineno_310
 
 
 def _find_goto_and_label(
@@ -347,11 +370,12 @@ def _find_goto_and_label(
 
                 labels[load_attr.arg] = _Label(ins, tuple(block_stack))
         elif opname in ("SETUP_FINALLY", "SETUP_WITH",
-                        "SETUP_ASYNC_WITH", "FOR_ITER"):
+                        "SETUP_ASYNC_WITH", "FOR_ITER",
+                        "JUMP_IF_NOT_EXC_MATCH"):
             block_stack.append(ins.id)
             if opname == "FOR_ITER":
                 for_end.add(ins.jump_target)
-        elif opname == "POP_BLOCK" and block_stack:
+        elif opname in ("POP_BLOCK", "POP_EXCEPT") and block_stack:
             block_stack.pop()
 
     return gotos, labels
