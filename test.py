@@ -215,10 +215,16 @@ def test_implicit_pushpop_block_2():
 
 def test_lineno_decrease():
     def func():
-        print(
-            a(),
-            b()
-        )
+        try:
+            with open("something"):
+                pass
+            print(
+                func(),
+                func()
+            )
+        except:
+            pass
+        print("hehe")
     original = func.__code__
     modified = patch(original)
 

@@ -115,15 +115,15 @@ def patch(code: types.CodeType) -> types.CodeType:
     if _is_39():
         return code.replace(
             co_code=bytes(_compile(instructions)),
-            co_lnotab=bytes(_encode_lineno(code.co_firstlineno, instructions)),
+            co_lnotab=bytes(_encode_lineno_39(code.co_firstlineno, instructions)),
             co_consts=tuple(co_consts)
         )
     else:
         return code.replace(
             co_code=bytes(_compile(instructions)),
-            co_lnotab=bytes(_encode_lineno(code.co_firstlineno, instructions)),
+            co_linetable=bytes(_encode_lineno_310(code.co_firstlineno, instructions)),
             co_consts=tuple(co_consts)
-        )
+        )  # type: ignore
 
 
 def _is_39() -> bool:
@@ -295,13 +295,6 @@ def _encode_lineno_39(
     instructions: t.Iterable[_Instruction]
 ) -> t.Generator[int, None, None]:
     """encode line number to line number table (co_lnotab)"""
-    # TODO: fix line number can be decreasing
-    # disassemble the below code
-    # 1 def x():
-    # 2     print(
-    # 3       a(),
-    # 4       b()
-    # 2     )
     prevoffset = 0
     prevline = firstlineno
     for i, ins in filter(lambda x: x[1].lineno is not None, enumerate(instructions)):
@@ -331,11 +324,21 @@ def _encode_lineno_39(
         prevoffset, prevline = _get_offset(i), ins.lineno
 
 
-if _is_39():
-    _encode_lineno = _encode_lineno_39
-else:
-    # TODO: implement 3.10
-    _encode_lineno = _encode_lineno_310
+def _encode_lineno_310(
+    firstlineno: int,
+    instructions: t.Sequence[_Instruction]
+) -> bytearray:
+    # this function has not been tested...
+    # please run the test yourself...
+    # make sure you are using python 3.10
+    lnotab = bytearray(_encode_lineno_39(firstlineno, instructions))
+    # shift offset_incr -1
+    i = 0
+    while i < len(lnotab)-2:
+        lnotab[i] = lnotab[i + 2]
+        i += 2
+    lnotab[-2] = len(lnotab)
+    return lnotab
 
 
 def _find_goto_and_label(
@@ -383,7 +386,10 @@ def _find_goto_and_label(
 
 def _get_instructions(code: types.CodeType) -> t.Generator[_Instruction, None, None]:
     instructions = tuple(map(_Instruction.create, dis.get_instructions(code)))
-    linemap = dict(dis.findlinestarts(code))
+    if _is_39():
+        linemap = dict(dis.findlinestarts(code))
+    else:
+        linemap = dict(map(lambda x: (x[0], x[2]), code.co_lines()))  # type: ignore
 
     for i, ins in enumerate(instructions):
         if ins.opcode in dis.hasjabs:
