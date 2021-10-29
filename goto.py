@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from sys import version_info
+from warnings import warn
 import typing as t
 import types
 import dis
@@ -10,6 +11,10 @@ goto: t.Any = None
 label: t.Any = None
 
 
+if version_info[:2] >= (3, 10):
+    warn("goto with python >=3.10 is very unstable, make sure all tests passed")
+
+
 @dataclass(init=False, repr=False)
 class _Instruction:
     """a mutable instruction"""
@@ -17,9 +22,12 @@ class _Instruction:
     opcode: int
     arg: int
 
-    # optional attribute
+    # optional
     jump_target: t.Optional[int]  # target id
     lineno: t.Optional[int]
+
+    # other
+    is_except_start: bool
 
     def __init__(
         self,
@@ -33,13 +41,18 @@ class _Instruction:
         self.jump_target = None
         self.lineno = None
 
+        self.is_except_start = False
+
     def __repr__(self) -> str:
         return ("Instruction("
                 f"id={self.id}, "
-                f"opcode={self.opcode}, "
                 f"opname={dis.opname[self.opcode]}, "
-                f"arg={self.arg}"
-                ")")
+                f"arg={self.arg}, "
+                f"jump_target={self.jump_target}, "
+                f"lineno={self.lineno},"
+                f"is_except_start={self.is_except_start}"
+                ")"
+        )
 
     @classmethod
     def create(cls, ins: dis.Instruction) -> '_Instruction':
@@ -207,7 +220,7 @@ def _get_block_ins(
                 yield _Instruction(dis.opmap["POP_TOP"], 0)
             elif opname == "SETUP_FINALLY":
                 yield _Instruction(dis.opmap["POP_BLOCK"], 0)
-            elif opname == "JUMP_IF_NOT_EXC_MATCH":
+            elif ins.is_except_start:
                 yield _Instruction(dis.opmap["POP_EXCEPT"], 0)
             elif opname == "SETUP_WITH":
                 if None not in co_consts:
@@ -251,8 +264,8 @@ def _get_block_ins(
                 ins_copy = _Instruction(ins.opcode, ins.arg)
                 ins_copy.jump_target = ins.jump_target
                 yield ins_copy
-            elif opname in ("SETUP_WITH", "SETUP_ASYNC_WITH",
-                            "FOR_ITER", "JUMP_IF_NOT_EXC_MATCH"):
+            elif (opname in ("SETUP_WITH", "SETUP_ASYNC_WITH", "FOR_ITER")
+                  or ins.is_except_start):
                 raise SyntaxError("can't jump into 'with', 'for' or 'except' block."
                                   f" at line {_take_min_lineno(instructions, origin_i)}")
             else:
@@ -328,7 +341,7 @@ def _encode_lineno_310(
     firstlineno: int,
     instructions: t.Sequence[_Instruction]
 ) -> bytearray:
-    # this function has not been tested...
+    # this function is untested...
     # please run the test yourself...
     # make sure you are using python 3.10
     lnotab = bytearray(_encode_lineno_39(firstlineno, instructions))
@@ -349,13 +362,25 @@ def _find_goto_and_label(
     gotos: t.List[_Goto] = []
     labels: t.Dict[int, _Label] = {}
 
-    for_end: t.Set[int] = set()  # end FOR_ITER id
+    # block_ptr contains the instruction id obtained from the following instruction:
+    # FOR_ITER      - end of for block
+    # SETUP_FINALLY - 'except' block start
+    # the key is instruction id, the value is referrer opcode
+    block_ptr: t.Dict[int, int] = {}
     block_stack: t.List[int] = []  # block start id
     for i, ins in enumerate(instructions):
-        if ins.id in for_end:
-            for_end.remove(ins.id)
-            if block_stack:
-                block_stack.pop()
+        if ins.id in block_ptr:
+            referrer_opname = dis.opname[block_ptr[ins.id]]
+            del block_ptr[ins.id]
+
+            if referrer_opname == "FOR_ITER":
+                if block_stack:
+                    block_stack.pop()
+            elif referrer_opname == "SETUP_FINALLY":
+                ins.is_except_start = True
+                block_stack.append(ins.id)
+            else:
+                assert False, "unknown block pointer"
 
         opname = dis.opname[ins.opcode]
         if opname in ("LOAD_GLOBAL", "LOAD_NAME"):
@@ -373,13 +398,18 @@ def _find_goto_and_label(
 
                 labels[load_attr.arg] = _Label(ins, tuple(block_stack))
         elif opname in ("SETUP_FINALLY", "SETUP_WITH",
-                        "SETUP_ASYNC_WITH", "FOR_ITER",
-                        "JUMP_IF_NOT_EXC_MATCH"):
+                        "SETUP_ASYNC_WITH", "FOR_ITER"):
             block_stack.append(ins.id)
-            if opname == "FOR_ITER":
-                for_end.add(ins.jump_target)
-        elif opname in ("POP_BLOCK", "POP_EXCEPT") and block_stack:
-            block_stack.pop()
+            if opname in ("FOR_ITER",  "SETUP_FINALLY"):
+                block_ptr[ins.jump_target] = ins.opcode
+        elif block_stack:
+            if opname == "RERAISE":
+                _, curr_block = _find_by_id(instructions, block_stack[-1])
+                if curr_block.is_except_start:
+                    block_stack.pop()
+                # otherwise, it's a WITH_EXCEPT_START block, no need to pop
+            elif opname == "POP_BLOCK":
+                block_stack.pop()
 
     return gotos, labels
 

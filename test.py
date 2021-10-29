@@ -243,3 +243,14 @@ def test_goto_except_block():
             label .exc
 
     pytest.raises(SyntaxError, with_goto, func)
+
+
+def test_goto_except_block_2():
+    def func():
+        goto .exc
+        try:
+            pass
+        except:
+            label .exc
+
+    pytest.raises(SyntaxError, with_goto, func)
