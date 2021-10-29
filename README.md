@@ -5,7 +5,7 @@ make sure you are using python 3.9
 pip install -U goto-label
 ```
 
-**NOTE: support for python >=3.10 is very unstable.**
+**NOTE: support for python >=3.10 is very unstable, please run the test before using.**
 
 # Usage
 a simple example:
