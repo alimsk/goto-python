@@ -7,7 +7,7 @@ import dis
 
 
 # for linter purpose
-goto: t.Any = None
+goto: t.Any  = None
 label: t.Any = None
 
 
@@ -26,7 +26,7 @@ class _Instruction:
     jump_target: t.Optional[int]  # target id
     lineno: t.Optional[int]
 
-    # other
+    # indicates the start of an 'except' block
     is_except_start: bool
 
     def __init__(
@@ -38,19 +38,18 @@ class _Instruction:
         self.opcode = opcode
         self.arg = arg
 
-        self.jump_target = None
-        self.lineno = None
+        self.jump_target = self.lineno = None
 
         self.is_except_start = False
 
     def __repr__(self) -> str:
         return ("Instruction("
-                f"id={self.id}, "
-                f"opname={dis.opname[self.opcode]}, "
-                f"arg={self.arg}, "
-                f"jump_target={self.jump_target}, "
-                f"lineno={self.lineno},"
-                f"is_except_start={self.is_except_start}"
+                f"{self.id=}, "
+                f"{dis.opname[self.opcode]=}, "
+                f"{self.arg=}, "
+                f"{self.jump_target=}, "
+                f"{self.lineno=}, "
+                f"{self.is_except_start=}"
                 ")"
         )
 
@@ -95,7 +94,7 @@ def patch(code: types.CodeType) -> types.CodeType:
         # delete LOAD_GLOBAL label, LOAD_ATTR, POP_TOP
         del instructions[index:index + 3]
 
-        jump_referrer = filter(lambda x: x.jump_target == ins.id, instructions)
+        jump_referrer = _find_jump_referrer(ins, instructions)
         for referrer_ins in jump_referrer:
             referrer_ins.jump_target = instructions[index].id
 
@@ -124,6 +123,10 @@ def patch(code: types.CodeType) -> types.CodeType:
         if ins is not None:
             # shift lineno
             instructions[index].lineno, goto.ins.lineno = goto.ins.lineno, None
+            # shift referrer target (jump_target)
+            jump_referrer = _find_jump_referrer(goto.ins, instructions)
+            for referrer_ins in jump_referrer:
+                referrer_ins.jump_target = instructions[index].id
 
     if _is_39():
         return code.replace(
@@ -190,7 +193,7 @@ def _extend_args(instructions: t.MutableSequence[_Instruction]) -> None:
                 next(it)
             last_extended_arg = instructions[i]  # most top EXTENDED_ARG
 
-            jump_referrer = filter(lambda x: x.jump_target == ins.id, instructions)
+            jump_referrer = _find_jump_referrer(ins, instructions)
             for referrer_ins in jump_referrer:
                 referrer_ins.jump_target = last_extended_arg.id
 
@@ -213,7 +216,7 @@ def _get_block_ins(
                               f" at line {_take_min_lineno(instructions, origin_i)}")
 
         for ins_id in origin[len(target):]:
-            _, ins = _find_by_id(instructions, ins_id)
+            i, ins = _find_by_id(instructions, ins_id)
             assert ins is not None
             opname = dis.opname[ins.opcode]
             if opname == "FOR_ITER":
@@ -221,7 +224,34 @@ def _get_block_ins(
             elif opname == "SETUP_FINALLY":
                 yield _Instruction(dis.opmap["POP_BLOCK"], 0)
             elif ins.is_except_start:
-                yield _Instruction(dis.opmap["POP_EXCEPT"], 0)
+                _opname1 = dis.opname[instructions[i+1].opcode]
+                _opname2 = dis.opname[instructions[i+2].opcode]
+                # complete mess
+                if (
+                    # the except: ... syntax
+                    "POP_TOP"
+                    == opname
+                    == _opname1
+                    == _opname2
+                ) or (
+                    # the except Exception: ... syntax
+                    "DUP_TOP" == opname and
+                    "LOAD_GLOBAL" == _opname1 and
+                    "JUMP_IF_NOT_EXC_MATCH" == _opname2 and
+                    ("POP_TOP"
+                     == dis.opname[instructions[i+3].opcode]
+                     == dis.opname[instructions[i+4].opcode]
+                     == dis.opname[instructions[i+5].opcode]
+                    )
+                ):
+                    yield _Instruction(dis.opmap["POP_EXCEPT"], 0)
+                else:
+                    yield from reversed((
+                        _Instruction(dis.opmap["POP_TOP"], 0),
+                        _Instruction(dis.opmap["POP_TOP"], 0),
+                        _Instruction(dis.opmap["POP_TOP"], 0),
+                        _Instruction(dis.opmap["POP_EXCEPT"], 0)
+                    ))
             elif opname == "SETUP_WITH":
                 if None not in co_consts:
                     co_consts.append(None)
@@ -266,7 +296,7 @@ def _get_block_ins(
                 yield ins_copy
             elif (opname in ("SETUP_WITH", "SETUP_ASYNC_WITH", "FOR_ITER")
                   or ins.is_except_start):
-                raise SyntaxError("can't jump into 'with', 'for' or 'except' block."
+                raise SyntaxError("can't jump into 'with', 'for', 'except', and 'finally' block."
                                   f" at line {_take_min_lineno(instructions, origin_i)}")
             else:
                 assert False, f"unsupported block instruction: {opname}"
@@ -276,6 +306,13 @@ def _get_block_ins(
     else:
         raise SyntaxError("jump into different block."
                           f" at line {_take_min_lineno(instructions, origin_i)}")
+
+
+def _find_jump_referrer(
+    ins: _Instruction,
+    instructions: t.Iterable[_Instruction]
+) -> t.Iterable[_Instruction]:
+    return filter(lambda x: x.jump_target == ins.id, instructions)
 
 
 def _split_arg(value: int) -> t.Generator[t.Tuple[int, int], None, None]:
@@ -400,7 +437,7 @@ def _find_goto_and_label(
         elif opname in ("SETUP_FINALLY", "SETUP_WITH",
                         "SETUP_ASYNC_WITH", "FOR_ITER"):
             block_stack.append(ins.id)
-            if opname in ("FOR_ITER",  "SETUP_FINALLY"):
+            if opname in ("FOR_ITER", "SETUP_FINALLY"):
                 block_ptr[ins.jump_target] = ins.opcode
         elif block_stack:
             if opname == "RERAISE":
