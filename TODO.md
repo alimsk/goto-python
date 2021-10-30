@@ -5,5 +5,7 @@
 
 - [x] upload to pypi
 
+- [x] assert python version when imported
+
 # Optional
 - [ ] function to minimize line table

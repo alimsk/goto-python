@@ -8,7 +8,7 @@ README = (HERE / "README.md").read_text()
 
 setup(
     name="goto-label",
-    version="0.1.1",
+    version="0.1.2",
     description="A function decorator, that rewrites the bytecode, to enable goto in Python",
     long_description=README,
     long_description_content_type="text/markdown",

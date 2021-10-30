@@ -13,6 +13,8 @@ label: t.Any = None
 
 if version_info[:2] >= (3, 10):
     warn("goto with python >=3.10 is very unstable, make sure all tests passed")
+elif version_info[:2] != (3, 9):
+    raise NotImplementedError("goto requires python 3.9 or above")
 
 
 @dataclass(init=False, repr=False)
@@ -143,8 +145,6 @@ def patch(code: types.CodeType) -> types.CodeType:
 
 
 def _is_39() -> bool:
-    if version_info[:2] not in ((3, 9), (3, 10)):
-        raise NotImplementedError("goto requires python 3.9 or above")
     return version_info[:2] == (3, 9)
 
 
@@ -224,25 +224,16 @@ def _get_block_ins(
             elif opname == "SETUP_FINALLY":
                 yield _Instruction(dis.opmap["POP_BLOCK"], 0)
             elif ins.is_except_start:
-                _opname1 = dis.opname[instructions[i+1].opcode]
-                _opname2 = dis.opname[instructions[i+2].opcode]
-                # complete mess
                 if (
                     # the except: ... syntax
                     "POP_TOP"
                     == opname
-                    == _opname1
-                    == _opname2
+                    == dis.opname[instructions[i+1].opcode]
+                    == dis.opname[instructions[i+2].opcode]
                 ) or (
-                    # the except Exception: ... syntax
-                    "DUP_TOP" == opname and
-                    "LOAD_GLOBAL" == _opname1 and
-                    "JUMP_IF_NOT_EXC_MATCH" == _opname2 and
-                    ("POP_TOP"
-                     == dis.opname[instructions[i+3].opcode]
-                     == dis.opname[instructions[i+4].opcode]
-                     == dis.opname[instructions[i+5].opcode]
-                    )
+                    # the except Exc: ... syntax
+                    # or except (Exc1, Exc2): ...
+                    opname == "DUP_TOP"
                 ):
                     yield _Instruction(dis.opmap["POP_EXCEPT"], 0)
                 else:
