@@ -302,7 +302,7 @@ def _get_block_ins(
 def _find_jump_referrer(
     ins: _Instruction,
     instructions: t.Iterable[_Instruction]
-) -> t.Iterable[_Instruction]:
+) -> t.Iterator[_Instruction]:
     return filter(lambda x: x.jump_target == ins.id, instructions)
 
 
