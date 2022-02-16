@@ -1,6 +1,6 @@
 # readme
 - goto-python only work with python 3.9, idk about 3.10.
-- the author of this module is not responsible if there is a problem with your app caused by this module.
+- use it at your own risk, the author of this module does not fucking care if there is a problem with your app caused by this module.
 
 # features
 - does not add unnecessary `NOP` instructions to the code.
