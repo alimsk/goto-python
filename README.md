@@ -1,17 +1,21 @@
-# readme
+### readme
+
 - goto-python only work with python 3.9, idk about 3.10.
 - use at your own risk, the author of this module does not care if there is a problem with your app caused by this module.
 
-# features
+### features
+
 - does not add unnecessary `NOP` instructions to the code.
-- automatically add push/pop block instructions if necessary.
+- automatically add push/pop block instructions if necessary.\
+  for example, if you jump out of `for` block, it automatically pop the iterator from the stack (as `break` does).
 
-# limitations
-- can't jump into 'with', 'for', 'except', and 'finally' block. but can jump out of it.
+### limitations
 
-# usage and examples
-it's actually very simple, there's only two keyword, `goto` and `label`.
+- can't jump into `with`, `for`, `except`, and `finally` block. **but can jump out of it.**
 
+### usage and examples
+
+it's actually very simple, there's only two keyword, `goto` and `label`.\
 `label` define a label.
 `goto` goto into the given label.
 
@@ -57,10 +61,34 @@ dis.dis(newcode)
 #          4 RETURN_VALUE
 ```
 
-# how does it work?
+### examples of good gotos in python (IMO)
+
+since python does not have labeled break/continue, we can use goto to do it.
+
+1. to break out of nested loop
+```py
+for _ in ...:
+  for _ in ...:
+    if should_break:
+      goto .breakloop  # break outer loop
+label .breakloop
+```
+
+2. to continue outer from inner loop
+```py
+for _ in ...:
+  for _ in ...:
+    if should_continue:
+      goto .continueouter  # continue outer loop
+  label .continueouter
+```
+
+### how does it work?
+
 basically it just replaces goto instruction with `JUMP_ABSOLUTE`.
 
 #
+
 have a look at this module [brandtbucher/hax](https://github.com/brandtbucher/hax),
 it can do the same job as goto-python does, but it requires you to have basic knowledge of python bytecode,
 and i guess its portable between python version?
