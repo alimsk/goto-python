@@ -1,3 +1,11 @@
+### installation
+
+compatible with python 3.9 or newer.\
+tested with python 3.9.
+```
+pip install goto-label
+```
+
 ### readme
 
 - goto-python only work with python 3.9, idk about 3.10.
@@ -19,26 +27,30 @@ it's actually very simple, there's only two keyword, `goto` and `label`.\
 `label` define a label.
 `goto` goto into the given label.
 
-it can be used as a decorator of a function, or by patching a code object:
+it can be used as a decorator of a function:
+
 ```py
-from goto import with_goto, patch
+from goto import with_goto
+
+@with_goto
+def example():
+  goto .end
+  print("this will not print")
+  label .end
+  print("this will print")
+
+example()
+
+# output:
+# this will print
+```
+
+or by patching code object:
+
+```py
+from goto import patch
 import dis
 
-# --- as a decorator ---
-@with_goto
-def inputpassword(maxretries):
-  label .retry
-  if maxretries == 0:
-    return False
-
-  pw = input("password: ")
-  if pw != "1234":
-    maxretries -= 1
-    goto .retry
-
-  return True
-
-# --- patching code object ---
 code = compile("goto .lbl; label .lbl;", "<string>", "exec")
 newcode = patch(code)
 print("original:")
@@ -70,8 +82,8 @@ since python does not have labeled break/continue, we can use goto to do it.
 for _ in ...:
   for _ in ...:
     if should_break:
-      goto .breakloop  # break outer loop
-label .breakloop
+      goto .br  # break outer loop
+label .br
 ```
 
 2. to continue outer from inner loop
@@ -79,8 +91,8 @@ label .breakloop
 for _ in ...:
   for _ in ...:
     if should_continue:
-      goto .continueouter  # continue outer loop
-  label .continueouter
+      goto .con  # continue outer loop
+  label .con
 ```
 
 ### how does it work?
@@ -91,4 +103,4 @@ basically it just replaces goto instruction with `JUMP_ABSOLUTE`.
 
 have a look at this module [brandtbucher/hax](https://github.com/brandtbucher/hax),
 it can do the same job as goto-python does, but it requires you to have basic knowledge of python bytecode,
-and i guess its portable between python version?
+and i guess it's portable between python version?
