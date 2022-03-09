@@ -27,7 +27,7 @@ it's actually very simple, there's only two keyword, `goto` and `label`.\
 `label` define a label.
 `goto` goto into the given label.
 
-it can be used as a decorator of a function:
+1. as a decorator of a function:
 
 ```py
 from goto import with_goto
@@ -45,7 +45,7 @@ example()
 # this will print
 ```
 
-or by patching code object:
+2. by patching code object:
 
 ```py
 from goto import patch
