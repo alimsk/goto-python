@@ -1,33 +1,27 @@
-### installation
-
-compatible with python 3.9 or newer.\
+# Installation
+Compatible with python 3.9 or newer.\
 tested with python 3.9.
 ```
 pip install goto-label
 ```
 
-### readme
-
 - goto-python only work with python 3.9, idk about 3.10.
-- use at your own risk, the author of this module does not care if there is a problem with your app caused by this module.
+- use at your own risk, the author of this module is not responsible if there is a problem with your app.
 
-### features
-
+### Features
 - does not add unnecessary `NOP` instructions to the code.
 - automatically add push/pop block instructions if necessary.\
   for example, if you jump out of `for` block, it automatically pop the iterator from the stack (as `break` does).
 
-### limitations
-
+### Limitations
 - can't jump into `with`, `for`, `except`, and `finally` block. **but can jump out of it.**
 
-### usage and examples
+# Syntax
+- `goto .name` jump to `name`.
+- `label .name` define label `name`.
 
-it's actually very simple, there's only two keyword, `goto` and `label`.\
-`label` define a label.
-`goto` goto into the given label.
-
-1. as a decorator of a function:
+# Usage
+1\. as a decorator of a function
 
 ```py
 from goto import with_goto
@@ -45,17 +39,22 @@ example()
 # this will print
 ```
 
-2. by patching code object:
+2\. patching code object
 
 ```py
 from goto import patch
 import dis
 
-code = compile("goto .lbl; label .lbl;", "<string>", "exec")
+# make code object
+codestring = "goto .lbl; label .lbl"
+code = compile(codestring, "<string>", "exec")
+
+# patch code object
 newcode = patch(code)
+
 print("original:")
 dis.dis(code)
-print("patched:")
+print("modified:")
 dis.dis(newcode)
 
 # original:
@@ -67,17 +66,15 @@ dis.dis(newcode)
 #         10 POP_TOP
 #         12 LOAD_CONST           0 (None)
 #         14 RETURN_VALUE
-# patched:
+# modified:
 #  1       0 JUMP_ABSOLUTE        2
 #    >>    2 LOAD_CONST           0 (None)
 #          4 RETURN_VALUE
 ```
 
-### examples of good gotos in python (IMO)
+### Examples of good gotos in python (IMO)
+labeled break/continue
 
-since python does not have labeled break/continue, we can use goto to do it.
-
-1. to break out of nested loop
 ```py
 for _ in ...:
   for _ in ...:
@@ -85,8 +82,6 @@ for _ in ...:
       goto .br  # break outer loop
 label .br
 ```
-
-2. to continue outer from inner loop
 ```py
 for _ in ...:
   for _ in ...:
@@ -95,12 +90,6 @@ for _ in ...:
   label .con
 ```
 
-### how does it work?
-
-basically it just replaces goto instruction with `JUMP_ABSOLUTE`.
-
 #
-
-have a look at this module [brandtbucher/hax](https://github.com/brandtbucher/hax),
-it can do the same job as goto-python does, but it requires you to have basic knowledge of python bytecode,
-and i guess it's portable between python version?
+this module [brandtbucher/hax](https://github.com/brandtbucher/hax),
+can do the same job as goto-python does, but it requires you to have basic knowledge of python bytecode.
